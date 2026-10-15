@@ -1,0 +1,250 @@
+PICTO — BUILD PLAN
+================================================================================
+Deadline: Oct 17.  Updated: 2026-10-15.
+
+GOAL
+  A coding agent governed by ArmorIQ.
+  A maintainer comments on a GitHub issue -> our bot reads it, does the work in a
+  real clone of a real repo, opens a PR. When it tries something out of policy,
+  ArmorIQ stops it, Slack asks a human, the human approves, the agent finishes.
+
+================================================================================
+USER ACTIONS REQUIRED   (only you can do these - I am blocked on the last one)
+================================================================================
+  [x] 1. GitHub App private key                              DONE 2026-10-15
+         Key generated under Credentials -> Key pairs, verified against
+         GET /app -> 200. app id 5328573, slug picto-bot, owner jugniG.
+         The app is ALREADY INSTALLED: installation 171675102 on
+         Sahil-Gupta584 (all repos).
+         Permissions: contents=write, issues=write, pull_requests=write,
+                      metadata=read
+         Events:      issue_comment, pull_request, ...
+         -> we can push, comment and open PRs, and issue_comment is our trigger.
+         Stored as GITHUB_APP_PRIVATE_KEY_B64 in .env. No .pem on disk.
+         !! Key was pasted into chat. ROTATE BEFORE SUBMITTING.
+
+  [ ] 2. Register BOTH MCP servers in the ArmorIQ dashboard   <<< ONLY BLOCKER
+         platform.armoriq.ai -> MCP servers -> add server
+           id: picto-fs     url: <tunnel>/mcp/fs
+           id: picto-repo   url: <tunnel>/mcp/repo
+         The control plane refuses registration with the SDK API key
+         (POST /mcp/register -> 401 "Access token is required"), so this is
+         dashboard-only and needs YOUR login.
+         PROOF IT IS NEEDED: invoke() returns HTTP 500 from proxy.armoriq.ai
+         until the MCP exists. See PHASE 0 below.
+
+  [ ] 3. Slack signing secret                                 <<< NEEDED FOR PHASE 4
+         api.slack.com/apps -> your app -> Basic Information -> App Credentials
+         (also grab the Client ID while you are there, for the "Add to Slack" URL)
+         CONFIRMED MISSING: SLACK_SIGNING_SECRET exists in .env but is EMPTY.
+         Without it /slack/interactions refuses every request, which is correct -
+         an unverified button click is indistinguishable from a forged one.
+         This is the SIGNING SECRET, not the Client Secret pasted earlier.
+         They are two different values on the same page.
+
+================================================================================
+PHASE 0 — VERIFY BEFORE BUILDING                            (DONE 2026-10-15)
+================================================================================
+  [x] 0.1 ArmorIQ API key valid        -> validateApiKey OK, 0 MCPs registered
+  [x] 0.2 capturePlan + getIntentToken -> VERIFIED LIVE
+          tokenId 0a13da3f... planHash 48ebb6bc..., stepProofs 1, ttl 300s
+          Ed25519-signed. Works with and without a custom policy object.
+  [!] 0.3 require_approval policy      -> INCONCLUSIVE, see finding 3
+  [!] 0.4 HOLD -> approve -> retry     -> UNTESTED until (2) above is done
+
+  FINDINGS
+  1. The SDK enforces plan membership CLIENT-SIDE, before any network call:
+       invoke() throws IntentMismatchException when the action is not a step in
+       the plan recorded by capturePlan(). "An action not in the plan" is a hard
+       block that never reaches the proxy. That is our intent_drift gate.
+  2. The SDK is fail-closed on proofs: it refuses to invoke without a CSRG
+       Merkle inclusion proof, even if the proxy would accept it.
+  3. Per-token policy is NOT being honoured yet. Passing
+       {rules:[{id, action:'require_approval'|'deny', tool:'push_main'}]}
+       returned policyValidation.matched_policies = [] and allowed_tools =
+       ['push_main'] - i.e. the rule did not match. Most likely the backend can
+       only match tools it knows about, which requires the MCP to be registered.
+       RE-TEST IMMEDIATELY AFTER (2). Until then the Slack/HOLD design rests on
+       an unverified assumption - do not build on it blind.
+  4. ArmorIQ's own source states params are NOT bound to the signed plan:
+       "this binds the action but NOT the call params; binding params requires
+       the CSRG-IAP Merkle leaf granularity to include args ... (#92)".
+       This is authoritative evidence for the README threat model. Use it.
+
+================================================================================
+PHASE 1 — WORKSPACE + MCP SERVERS                                    (DONE)
+================================================================================
+  [x] 1.1 config.ts - WORKSPACES_ROOT, MCP_PUBLIC_URL, GITHUB_*, SLACK_*, LLM_*
+  [x] 1.2 workspace/index.ts - clone per run, path jail, destroy, sweep.
+      Token is held in memory, never written into .git/config.
+  [x] 1.3 mcps/fs/tools/index.ts - read_file, write_file, list_files
+  [x] 1.4 mcps/repo/tools/index.ts - run_command, git_commit, push_branch, push_main
+      run_command runs with an env ALLOWLIST: the ArmorIQ key, Slack token and
+      GitHub private key cannot be read by a shell the agent chooses to run.
+  [x] 1.5 index.ts - /mcp/fs, /mcp/repo, /health on one port
+  [x] 1.6 deleted packages/mcp-server, the 10 bespoke CI tools, the seeded logs
+
+  VERIFIED: probe-mcp.mjs against the tunnel lists 3 + 4 tools on both servers.
+
+================================================================================
+PHASE 2 — THE AGENT                                                  (DONE)
+================================================================================
+  [x] 2.1 agent/llm.ts - OpenAI-compatible chat with tool calling
+  [x] 2.2 agent/prompts.ts - system prompt; reads the repo's own AGENTS.md
+  [x] 2.3 agent/planner.ts - model declares intent -> plan -> ArmorIQ signs it
+  [x] 2.4 agent/index.ts - loop: model -> governed act() -> result -> model
+  [x] 2.5 on block: emit event, ask a human, re-sign the plan, retry
+  [x] 2.6 mcps/registry.ts - ONE source of truth for the tool surface, so the
+          MCP servers and the model's schemas cannot drift apart
+  [x] 2.7 scripts/run-local.ts - drives the real loop from the terminal, with
+          stdin standing in for Slack
+
+  VERIFIED LIVE 2026-10-15
+  - the planner produces a real goal from a real issue, and the model, told
+    "push it straight to main, no PR", asks for push_main - which the planner
+    REFUSES to auto-declare:
+        goal    : Add dismiss action for leads
+        steps   : list_files, read_file, write_file, run_command, git_commit, push_branch
+        refused : push_main
+  - the block fires, with the plan hash signed and the reason from ArmorIQ:
+        push_main -> blocked | IntentMismatchException
+          Action 'push_main' not found in the original plan.
+          Plan contains: ["list_files","read_file","write_file","run_command",
+                          "git_commit","push_branch"]
+    This is a genuine ⛔ from ArmorIQ, not a check we wrote.
+  - `workspace` is stripped from the schema the model sees, so the model cannot
+    name someone else's workspace; it is re-attached before the call.
+
+  OUTSTANDING: an action that IS in the plan currently returns
+  MCPInvocationException (HTTP 500 from proxy.armoriq.ai) because the MCP
+  servers are not registered yet. This is the ONLY thing standing between us and
+  a complete ✅/⛔ demo. See USER ACTIONS REQUIRED #2.
+
+================================================================================
+PHASE 3 — GITHUB TRIGGER                                                [ DONE ]
+================================================================================
+  [x] 3.1 github/webhook.ts - verify X-Hub-Signature-256, dedupe delivery id
+  [x] 3.2 act only on issue_comment "created"; ignore our own bot's comments
+  [x] 3.3 reply 202 immediately, run the agent in the background
+  [x] 3.4 clone with the installation token; push branch; open PR via Octokit
+  [x] 3.5 comment back on the issue, edited in place from "on it" to the result
+  [x] 3.6 github/context.ts - the agent is given the ISSUE, not just the comment
+
+  VERIFIED - scripts/probe-webhook.mjs, 8 cases:
+    unsigned                 -> 401
+    forged signature         -> 401
+    no @picto-bot mention    -> 200 ignored
+    comment from a bot       -> 200 ignored
+    another event (PR)       -> 200 ignored
+    edited comment           -> 200 ignored
+    valid mention            -> 202, run starts in the background
+    same delivery id again   -> 200 duplicate
+  Deliveries are claimed in SQLite, so the dedupe survives a restart - an
+  in-memory set would re-run after a redeploy.
+
+  BUG FOUND AND FIXED WHILE TESTING 3.1:
+  Octokit's webhooks.verify() ANSWERS true/false; it does not throw. Our
+  verifyWebhook was documented as "throws if the signature does not match" and
+  simply returned that value. So every caller that guarded with try/catch - the
+  obvious way to use a throwing function - ACCEPTED a forged payload. It is now
+  fail-closed: anything that is not exactly true throws. This is exactly why the
+  probe signs its own requests and asserts the REJECTIONS; a hand-written curl
+  would have passed.
+
+  CONTEXT FIX (the issue-comment trap the user caught):
+  An issue_comment payload carries the comment plus a STUB of the issue - no
+  body, none of the earlier comments. Building a run from the payload alone
+  leaves the agent acting on "please do that" with no idea what "that" is.
+  So the context is fetched instead:
+    - title + body   always, every run. It is the spec, and it is short.
+    - comments       all of them on first contact; afterwards only the ones
+                     this session has not been shown
+                     (cursor in sessions.last_comment_id)
+  The webhook and run-local.js call the SAME builder, so the terminal driver
+  cannot quietly be kinder to the agent than production is.
+
+STATUS: run-local.js, the webhook and the Slack approval all work. What still
+stands between us and the demo is ArmorIQ MCP registration (USER ACTION #2),
+without which an allowed action cannot actually execute, and the Slack signing
+secret (USER ACTION #3).
+
+================================================================================
+PHASE 4 — SLACK APPROVAL                                   [ DONE - needs (3) ]
+================================================================================
+  [x] 4.1 slack/blocks.ts - the Block Kit message a human actually decides on
+  [x] 4.2 slack/verify.ts - verify the Slack signature, timing-safe, with a
+          replay window; fails CLOSED
+  [x] 4.3 slack/index.ts - post on a block, wait, and resolve on a click
+  [x] 4.4 edit the message to "approved/denied by X" and drop the buttons
+  [x] 4.5 wire broker + store into the webhook's requestApproval
+
+  VERIFIED - scripts/probe-slack.mjs (in-process, Slack stubbed):
+
+    no signature                     -> 401
+    forged signature                 -> 401
+    stale timestamp (30 min old)     -> 401
+    body swapped, signed for another -> 401
+
+    a blocked run posts a message and sits in broker.wait()  (waiting: 1)
+    a signed Approve click           -> run resumed = TRUE
+    stored status / decided by       -> approved / sahil
+    message redrawn                  -> yes, buttons removed
+    replay: Deny a settled approval  -> ignored, stays approved
+
+  WHY IT IS TESTED IN-PROCESS: the point is not that an endpoint answered, it is
+  that a signed click WAKES THE WAITING RUN. That needs the test to hold the
+  other end of the wire, so the probe drives the router itself and keeps a real
+  broker.wait() open across the click.
+
+  NOT USED: packages/agent-core/src/delegation.ts. ArmorIQ's delegation API is
+  role/amount-shaped (requesterRole, requesterLimit, domain, amount) - it is for
+  spend approvals. Ours is "may this one tool call proceed", and the decision and
+  its audit trail live in our own store, which is also what lets a Slack button
+  still be recorded after the process that asked has restarted.
+
+  FAIL-CLOSED TWICE OVER: if Slack is unreachable the run still stops - we never
+  continue because we could not ask. And a decision is refused if one already
+  exists, so a replayed callback cannot flip a denial into an approval.
+
+================================================================================
+PHASE 5 — DEPLOY   (so judges can install it on their own repo)
+================================================================================
+  [ ] 5.1 one container: backend + both MCP servers
+  [ ] 5.2 public URL -> register both MCPs in ArmorIQ; set the GitHub App webhook
+  [ ] 5.3 make the GitHub App public; Slack Client ID for "Add to Slack"
+  [ ] 5.4 README - what a judge does: install, comment, watch
+
+================================================================================
+PHASE 6 — POLISH
+================================================================================
+  [ ] 6.1 rotate every credential pasted in chat
+  [ ] 6.2 README threat model - tool-name granularity; quote source finding 4
+  [ ] 6.3 90-second demo script, rehearsed twice
+
+================================================================================
+SENIOR NOTES
+================================================================================
+  1. ArmorIQ matches tool NAMES, not arguments. Anything behind run_command
+     inherits run_command's permission - you cannot block a single command
+     inside it. This is why push_main is a separate tool from push_branch, and
+     why irreversible operations must each get their own name.
+
+  2. Policy semantics:
+       deny              -> absolute DENY, no approval path, ever
+       require_approval  -> HOLD; the only path a human can approve.
+     The Slack flow requires require_approval, not deny. UNVERIFIED (finding 3).
+
+  3. The maintainer's comment asks for the change to land on main with no PR.
+     A compliant agent therefore WILL attempt push_main - the attempt is
+     deterministic, not a lucky roll of the model.
+
+  4. run_command executes on the host. Isolation is a directory, a cwd jail, a
+     timeout and an env allowlist - not a VM. Real isolation needs a container.
+     Known limitation, documented, not hidden.
+
+  5. Never run the agent against a developer's own working tree. Clone per run,
+     always. C:\s\opencmo is dirty (feature branch, untracked files).
+
+  6. tunnel currently: https://bd87-106-194-232-113.ngrok-free.app -> :8787
+     Free ngrok URLs change on restart. Re-register in ArmorIQ and update
+     armoriq.yaml whenever it does.
