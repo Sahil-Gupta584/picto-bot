@@ -1,0 +1,19 @@
+# Line endings: LF in the repository, whatever the platform prefers on checkout.
+#
+# Without this, a Windows checkout commits CRLF and every diff against a Linux or
+# macOS clone shows whole files as changed. This project is developed on Windows
+# and cloned by judges on whatever they run, so it matters.
+* text=auto eol=lf
+
+# Shell scripts will not execute with CRLF.
+*.sh text eol=lf
+
+# Committed lockfile: keep it byte-for-byte, so it is never re-resolved by a
+# checkout.
+package-lock.json -text
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
