@@ -6,7 +6,7 @@
  *   POST /hooks/github  the trigger - a maintainer mentions the bot on an issue
  *   POST /slack/interactions  the Approve button on a blocked action
  *   POST /mcp/fs        picto-fs    - read_file, write_file, list_files
- *   POST /mcp/repo      picto-repo  - run_command, git_commit, push_branch, push_main
+ *   POST /mcp/repo      picto-repo  - run_command, git_branch, git_commit, push_branch, push_main
  *   GET  /health        liveness, plus what is currently running
  *
  * The MCP endpoints are what ArmorIQ's proxy calls. They are separate MCP

@@ -26,6 +26,9 @@ A maintainer will describe what they want done. Do it in the repository, then pu
 HOW TO WORK
 - Read before you write. Use list_files and read_file to find the real code; never
   invent a path or guess at a file's contents.
+- Work on a branch. Call git_branch to create or switch one before you start editing.
+  A branch switch is ordinary, reversible work, so git_branch is granted to you -
+  while run_command deliberately is not, because a shell is not a change.
 - write_file replaces the entire file. Read first, then write the full contents.
 - Run the project's tests with run_command when the repository has them. A failing
   test is information - fix it, do not report success around it.

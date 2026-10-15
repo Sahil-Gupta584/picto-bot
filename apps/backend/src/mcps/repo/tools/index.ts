@@ -1,7 +1,7 @@
 /**
  * picto-repo - run commands and move work to GitHub, inside one workspace.
  *
- * Why these four live together: they all operate on the working copy rather than
+ * Why these five live together: they all operate on the working copy rather than
  * on its contents.
  *
  * `push_branch` and `push_main` are separate tools on purpose. ArmorIQ matches
@@ -9,6 +9,10 @@
  * branch" and "publish to main" the same capability, and policy could not tell
  * them apart. Splitting them is what makes it possible to allow one and hold the
  * other.
+ *
+ * `git_branch` exists so that moving to a branch never requires the shell. It is
+ * one reversible act with a name of its own, which is what lets it be granted
+ * outright while `run_command` stays something a human has to approve.
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -73,6 +77,24 @@ function truncate(text: string): { text: string; truncated: boolean } {
   return { text: text.slice(0, MAX_OUTPUT_BYTES), truncated: true };
 }
 
+/**
+ * Switch the working copy to `branch`, creating it if it does not exist yet.
+ *
+ * Deliberately not `checkout -B`: `-B` resets an existing branch to the current
+ * commit, so asking to switch to a branch that already holds work would quietly
+ * discard that work. Creating a branch and overwriting one are different acts, and
+ * only the first is being asked for here.
+ */
+async function checkoutBranch(dir: string, branch: string): Promise<boolean> {
+  try {
+    await execFileAsync("git", ["checkout", branch], { cwd: dir, env: sandboxEnv() });
+    return false;
+  } catch {
+    await execFileAsync("git", ["checkout", "-b", branch], { cwd: dir, env: sandboxEnv() });
+    return true;
+  }
+}
+
 function sanitize(text: string, token: string): string {
   return token ? text.split(token).join("***") : text;
 }
@@ -134,6 +156,29 @@ export const repoTools: ToolDefinition[] = [
 
   {
     mcp: REPO_MCP_NAME,
+    name: "git_branch",
+    title: "Create or switch branch",
+    description:
+      "Create a branch, or switch to one that already exists, before making changes. " +
+      "This only moves the working copy - nothing is published until push_branch.",
+    shape: {
+      workspace: WORKSPACE_ARG,
+      branch: z
+        .string()
+        .describe("Branch to create or switch to, for example fix/rate-limit-window"),
+    },
+    handler: async (args, ctx) => {
+      const record = ctx.workspaces.get(String(args.workspace));
+      const branch = String(args.branch);
+      const from = record.branch;
+      const created = await checkoutBranch(record.dir, branch);
+      ctx.workspaces.setBranch(record.id, branch);
+      return { branch, created, from };
+    },
+  },
+
+  {
+    mcp: REPO_MCP_NAME,
     name: "git_commit",
     title: "Commit the working copy",
     description: "Stage every change in the repository and commit it.",
@@ -184,6 +229,7 @@ export const repoTools: ToolDefinition[] = [
           cwd: record.dir,
           env: sandboxEnv(),
         });
+        ctx.workspaces.setBranch(record.id, branch);
         return {
           pushed: true,
           branch,

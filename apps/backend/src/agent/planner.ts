@@ -13,11 +13,17 @@ import { PLANNER_PROMPT } from "./prompts.js";
 /**
  * The charter of any run.
  *
- * Reading, writing and publishing a branch are the ordinary capabilities of a
- * coding agent. Declaring them for every run is the operator's decision about
- * what this agent is for, not the model's - and it means a plan is always a
- * workable plan, instead of one that blocks the agent halfway through a task
- * because the model forgot to predict a step.
+ * Reading, writing, branching and publishing a branch are the ordinary
+ * capabilities of a coding agent. Declaring them for every run is the operator's
+ * decision about what this agent is for, not the model's - and it means a plan is
+ * always a workable plan, instead of one that blocks the agent halfway through a
+ * task because the model forgot to predict a step.
+ *
+ * `git_branch` is here for the same reason `run_command` is not. Creating a branch
+ * is one reversible act with a name, so it can be granted on its own; the model
+ * that wanted a branch and did not have one reached for the shell instead, which
+ * turned the most ordinary step of the task into an interruption for a human. The
+ * narrow tool is the thing that keeps the shell's absence from being a cost.
  *
  * `run_command` is deliberately NOT in this list. ArmorIQ matches a plan on tool
  * NAMES, not arguments, so declaring a generic shell declares everything that
@@ -29,6 +35,7 @@ const BASELINE = [
   "list_files",
   "read_file",
   "write_file",
+  "git_branch",
   "git_commit",
   "push_branch",
 ];

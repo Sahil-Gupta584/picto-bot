@@ -158,6 +158,17 @@ export class Workspaces {
     return found;
   }
 
+  /**
+   * Record that the working copy is now on `branch`.
+   *
+   * The record is what the other tools answer from - `git_commit` names the branch
+   * it committed to - so a switch that is not recorded leaves every later answer
+   * wrong about where the work went.
+   */
+  setBranch(id: string, branch: string): void {
+    this.get(id).branch = branch;
+  }
+
   /** Absolute path of `relative` inside the workspace, refusing any escape. */
   resolve(id: string, relative = "."): string {
     return assertInside(this.get(id).dir, relative);
