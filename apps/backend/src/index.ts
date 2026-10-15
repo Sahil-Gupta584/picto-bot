@@ -32,6 +32,19 @@ import { Workspaces } from "./workspace/index.js";
 
 const workspaces = new Workspaces(WORKSPACES_ROOT);
 const store = new SessionStore(DB_PATH);
+
+// No run survives a process restart: the loop, the clone handle and the promise
+// a Slack approval wakes all died with the last process. Anything the database
+// still describes as in flight is stale, so correct it before serving traffic
+// rather than showing work that is not happening.
+const recovered = store.recoverInterrupted();
+if (recovered.sessions > 0 || recovered.approvals > 0) {
+  console.log(
+    `[picto] after the restart: ${recovered.sessions} stale run(s) cleared, ` +
+      `${recovered.approvals} approval(s) abandoned (no run was waiting for them)`,
+  );
+}
+
 const toolContext = { workspaces };
 
 /**
@@ -52,6 +65,25 @@ const broker = new ApprovalBroker();
 const slackClient =
   SLACK.botToken && SLACK.channel ? new SlackClient(SLACK.botToken, SLACK.channel) : null;
 const approver = slackClient ? new SlackApprover({ store, broker, client: slackClient }) : null;
+
+/**
+ * The most dangerous configuration is the one that looks fine.
+ *
+ * With a bot token and no signing secret, everything succeeds right up to the
+ * moment a human acts: the approval message posts, the buttons look live, and
+ * every click is rejected on arrival - so the run waits for an answer that can
+ * never come. That is indistinguishable from a broken button, and it is silent.
+ * Say so at boot, where someone will see it.
+ */
+if (slackClient && !SLACK.signingSecret) {
+  console.warn(
+    "[picto] SLACK_BOT_TOKEN is set but SLACK_SIGNING_SECRET is empty:\n" +
+      "        approval messages will post and every button click will be rejected,\n" +
+      "        so a blocked run will wait until it times out.\n" +
+      "        Fix: Slack app -> Basic Information -> App Credentials -> Signing Secret.\n" +
+      "        Verify with: npm run slack:check",
+  );
+}
 
 const app = express();
 

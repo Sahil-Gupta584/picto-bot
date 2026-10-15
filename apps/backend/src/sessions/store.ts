@@ -44,7 +44,7 @@ export interface SessionRecord {
   updatedAt: number;
 }
 
-export type ApprovalStatus = "pending" | "approved" | "denied";
+export type ApprovalStatus = "pending" | "approved" | "denied" | "abandoned";
 
 export interface ApprovalRecord {
   id: string;
@@ -210,6 +210,34 @@ export class SessionStore {
     sets.push("updated_at = ?");
     values.push(Date.now(), key);
     this.db.prepare(`UPDATE sessions SET ${sets.join(", ")} WHERE key = ?`).run(...(values as never[]));
+  }
+
+  /**
+   * Clears the state that cannot survive a restart.
+   *
+   * A run lives inside the process that started it: the loop, the clone handle,
+   * and the promise a Slack approval wakes. When the process ends none of that
+   * exists, but the rows describing it do - so the database goes on claiming a
+   * run is in progress and an approval is awaited, neither of which is true.
+   *
+   * That is worse than untidy: a session shown as `running` looks like work in
+   * progress when nothing is happening, and a pending approval looks like a
+   * decision that still has an effect when its run is already gone.
+   *
+   * Called once at startup, which is the only moment the claim is knowable.
+   */
+  recoverInterrupted(reason = "abandoned by a restart"): { sessions: number; approvals: number } {
+    const sessions = this.db
+      .prepare("UPDATE sessions SET status = 'idle', updated_at = ? WHERE status = 'running'")
+      .run(Date.now());
+    const approvals = this.db
+      .prepare(
+        `UPDATE approvals SET status = 'abandoned', decided_at = ?, decided_by = ?
+         WHERE status = 'pending'`,
+      )
+      .run(Date.now(), reason);
+
+    return { sessions: Number(sessions.changes), approvals: Number(approvals.changes) };
   }
 
   // ── transcript ──────────────────────────────────────────────────────────
