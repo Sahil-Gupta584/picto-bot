@@ -57,17 +57,43 @@ try {
 console.log(`\nregistered MCPs for this org: ${mcps.length}\n`);
 for (const mcp of mcps) console.log(" ", JSON.stringify(mcp));
 
+const publicUrl = (process.env.PICTO_PUBLIC_URL ?? "").replace(/\/$/, "");
+
+const expected = [
+  { name: process.env.ARMORIQ_MCP_FS ?? "picto-fs", path: "/mcp/fs" },
+  { name: process.env.ARMORIQ_MCP_REPO ?? "picto-repo", path: "/mcp/repo" },
+];
+
 console.log("");
-for (const wanted of ["picto-fs", "picto-repo"]) {
-  const found = mcps.some((mcp) => mcp?.id === wanted || mcp?.name === wanted);
-  console.log(`${found ? "  OK     " : "  MISSING"} ${wanted}`);
+const stale = [];
+for (const wanted of expected) {
+  const found = mcps.find((mcp) => mcp?.name === wanted.name || mcp?.mcpId === wanted.name);
+  if (!found) {
+    console.log(`  MISSING  ${wanted.name}  nothing is registered under that name`);
+    continue;
+  }
+  console.log(`  OK       ${wanted.name}  ${found.url}`);
+
+  // A registration outlives the tunnel. ngrok hands out a new hostname on
+  // restart, and the dashboard keeps pointing at the old one - so every invoke
+  // 500s at the proxy while everything on this side looks healthy.
+  const current = `${publicUrl}${wanted.path}`;
+  if (publicUrl && found.url !== current) {
+    stale.push(wanted.name);
+    console.log(`           -> registered URL is stale. this deployment now serves\n              ${current}`);
+  }
 }
 
-console.log(
-  mcps.length
-    ? ""
-    : "  -> Neither server is registered. Every invoke() will 500 at the proxy,\n" +
-        "     because there is nothing for it to route the call to.\n",
-);
+if (stale.length) {
+  console.log(
+    `\n  -> ${stale.join(", ")}: why every invoke() 500s at the proxy. Point the\n` +
+      `     ArmorIQ dashboard at the URL above after each tunnel restart.\n`,
+  );
+} else if (!mcps.length) {
+  console.log(
+    "  -> Neither server is registered. Every invoke() will 500 at the proxy,\n" +
+      "     because there is nothing for it to route the call to.\n",
+  );
+}
 
 client.close();
