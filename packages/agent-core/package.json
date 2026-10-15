@@ -1,0 +1,17 @@
+{
+  "name": "@picto/agent-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsc --watch --preserveWatchOutput",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@armoriq/sdk": "^0.6.10",
+    "octokit": "5.0.5"
+  }
+}
