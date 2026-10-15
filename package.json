@@ -1,0 +1,47 @@
+{
+  "name": "picto",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Intent-locked CI agent. ArmorIQ governs every action the agent takes.",
+  "type": "module",
+  "packageManager": "npm@11.13.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "apps/backend",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "dev": "turbo run dev",
+    "clean": "turbo run clean",
+    "start": "npm run --workspace @picto/backend start",
+    "demo": "npm run --workspace @picto/backend agent:local",
+    "tunnel": "ngrok http 8787",
+    "github:check": "npm run --workspace @picto/backend github:check",
+    "github:app-config": "node --env-file=.env scripts/check-app-config.mjs",
+    "agent:plan": "npm run --workspace @picto/backend agent:plan",
+    "agent:drift": "npm run --workspace @picto/backend agent:drift",
+    "agent:local": "npm run --workspace @picto/backend agent:local",
+    "probe:webhook": "node --env-file=.env scripts/probe-webhook.mjs",
+    "probe:slack": "node scripts/probe-slack.mjs",
+    "probe:invoke": "node --env-file=.env scripts/probe-invoke.mjs",
+    "probe:models": "node --env-file=.env scripts/probe-models.mjs",
+    "mcp:check": "node --env-file=.env scripts/mcp-check.mjs",
+    "session:show": "node --env-file=.env scripts/show-session.mjs",
+    "trace:ngrok": "node scripts/ngrok-trace.mjs",
+    "redeliver": "node --env-file=.env scripts/redeliver.mjs",
+    "trigger": "node --env-file=.env scripts/trigger.mjs",
+    "issue:log": "node --env-file=.env scripts/issue-log.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "axios": "^1.7.9",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2"
+  }
+}
