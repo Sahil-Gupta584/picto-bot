@@ -34,6 +34,15 @@ const INTENT_TTL_SECONDS = 1800;
 const MAX_TOOL_RESULT_CHARS = 8_000;
 /** How much of the conversation the model is shown. */
 const HISTORY_LIMIT = 40;
+/**
+ * Stands in for a turn the model ended without words.
+ *
+ * The transcript is persisted and replayed on the next run, and an assistant
+ * message with empty content is the kind of thing a provider rejects - which
+ * would turn a silently empty reply into a failed run. This is only ever stored,
+ * never shown as the run's answer.
+ */
+const EMPTY_REPLY = "(the model ended its turn without saying anything)";
 
 /** Blocks that a human is allowed to override. Everything else is final. */
 const APPROVABLE = new Set(["IntentMismatchException", "PolicyHoldException", "PolicyBlockedException"]);
@@ -51,6 +60,7 @@ export type RunEvent =
   | { type: "replanned"; planHash: string; steps: string[] }
   | { type: "pushed"; target: string; url?: string }
   | { type: "reply"; text: string }
+  | { type: "nudge"; text: string }
   | { type: "error"; message: string };
 
 export interface ApprovalRequest {
@@ -152,6 +162,7 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
   let pushed: string | null = null;
   let summary = "";
   let planHash = "";
+  let nudged = false;
 
   try {
     const agentsFile = readAgentsFile(deps.workspaces.resolve(workspaceId));
@@ -200,11 +211,41 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
     // 2. Work.
     for (let turn = 0; turn < MAX_TURNS; turn += 1) {
       const assistant = await chat({ messages, tools: chatTools(), temperature: 0 });
+
+      // The transcript is stored and replayed, so even a turn the model ended
+      // without words has to be a valid message.
+      const said = (assistant.content ?? "").trim();
+      if (!said && (assistant.tool_calls ?? []).length === 0) assistant.content = EMPTY_REPLY;
       remember(assistant);
 
       const calls = assistant.tool_calls ?? [];
       if (calls.length === 0) {
-        summary = (assistant.content ?? "").trim();
+        summary = said;
+
+        // Stopping is not the same as finishing.
+        //
+        // A model can end its turn with the change written to disk and nothing
+        // published: no commit, no branch, no pull request. The run then reports
+        // that it finished while the maintainer sees an unchanged repository -
+        // indistinguishable from the agent having done nothing at all.
+        //
+        // The instruction to publish is already in the system prompt, so this is
+        // one reminder that it was not followed. Once is the right number: a
+        // model that declines a second time will not be argued into it, and a
+        // loop that keeps asking is worse than one that stops and says so.
+        if (!pushed && !nudged) {
+          nudged = true;
+          emit({ type: "nudge", text: said || "ended its turn before publishing" });
+          remember({
+            role: "user",
+            content:
+              "You ended your turn without publishing. If the change is ready, call git_commit and then push_branch now. " +
+              "If it is not ready, say what is still missing in one sentence. " +
+              "Ending here leaves the maintainer with nothing to review.",
+          });
+          continue;
+        }
+
         emit({ type: "reply", text: summary });
         break;
       }
@@ -383,16 +424,27 @@ function toolResult(id: string, content: string): ChatMessage {
 }
 
 /**
- * Drop a trailing assistant turn whose tool calls never got results.
+ * Make a transcript slice that a provider will actually accept.
  *
- * A run that is killed between asking for two tools and running them leaves
- * exactly that in the transcript, and every provider rejects a conversation
- * where an assistant promised results that never came. Trimming the incomplete
- * turn is the difference between a resumable session and a permanently poisoned
- * one.
+ * A conversation is a sequence of turns, and a slice of one can cut into the
+ * middle. Both ends have to be repaired, and both failures are fatal to the whole
+ * request rather than to the one message:
+ *
+ *   - A trailing assistant turn that promised tool calls whose results never
+ *     arrived. A run killed between asking and running leaves this behind, and
+ *     every provider rejects a promise that was never answered.
+ *
+ *   - A leading result message whose assistant call fell outside the window. That
+ *     message has no function name to report, and the provider rejects the
+ *     request over the empty name - which reads as "this session is broken"
+ *     rather than "this session is long", and it stays broken for every comment
+ *     that follows.
  */
 export function completeSequences(messages: ChatMessage[]): ChatMessage[] {
-  const out = [...messages];
+  let start = 0;
+  while (start < messages.length && messages[start]?.role === "tool") start += 1;
+  const out = messages.slice(start);
+
   let index = out.length - 1;
   while (index >= 0 && out[index]?.role === "tool") index -= 1;
 
