@@ -27,6 +27,7 @@
     "agent:local": "npm run --workspace @picto/backend agent:local",
     "probe:webhook": "node --env-file=.env scripts/probe-webhook.mjs",
     "probe:slack": "node scripts/probe-slack.mjs",
+    "slack:check": "node --env-file=.env scripts/check-slack-endpoint.mjs",
     "probe:invoke": "node --env-file=.env scripts/probe-invoke.mjs",
     "probe:models": "node --env-file=.env scripts/probe-models.mjs",
     "mcp:check": "node --env-file=.env scripts/mcp-check.mjs",
