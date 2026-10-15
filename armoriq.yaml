@@ -1,0 +1,51 @@
+# PICTO - ArmorIQ onboarding manifest
+#
+# Shape must match @armoriq/sdk's loader: identity / proxy / mcp_servers /
+# policy / intent. Validate with loadArmorIQConfig('armoriq.yaml').
+#
+# IMPORTANT: this file is read by the SDK to resolve MCP *routing*. Registering
+# the servers in the ArmorIQ control plane is a separate step and needs a
+# dashboard access token - the SDK API key is refused by POST /mcp/register.
+
+version: v1
+
+identity:
+  api_key: $ARMORIQ_API_KEY
+  user_id: ci-bot@picto.dev
+  agent_id: picto-ci-agent
+
+environment: production
+
+proxy:
+  url: https://proxy.armoriq.ai
+  timeout: 30
+  max_retries: 2
+
+# ArmorIQ's proxy runs in the cloud, so both URLs must be publicly reachable.
+# A localhost URL can never work. Re-point these whenever the tunnel changes.
+#
+# The `id` is the name the proxy routes by, and must match ARMORIQ_MCP_FS /
+# ARMORIQ_MCP_REPO in .env, and the name registered in the dashboard.
+mcp_servers:
+  - id: Filesystem
+    url: https://3fdc-171-48-84-150.ngrok-free.app/mcp/fs
+    description: Workspace filesystem - read_file, write_file, list_files
+    auth:
+      type: none
+
+  - id: Github
+    url: https://3fdc-171-48-84-150.ngrok-free.app/mcp/repo
+    description: Workspace execution and git - run_command, git_commit, push_branch, push_main
+    auth:
+      type: none
+
+# The authoritative policy is supplied per token by the backend (see
+# packages/agent-core/src/policy.ts) so that it can express require_approval,
+# which this file's allow/deny shape cannot.
+policy:
+  allow: []
+  deny: []
+
+intent:
+  ttl_seconds: 300
+  require_csrg: true
