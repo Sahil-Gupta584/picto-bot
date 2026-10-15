@@ -71,6 +71,63 @@ export const PICTO_POLICY: Policy = {
   ],
 };
 
+/**
+ * Reduce an MCP result to the value the tool actually returned.
+ *
+ * MCP wraps every result in a transport envelope: a list of content parts, each
+ * a tagged text blob with the real payload JSON-encoded inside. That envelope
+ * describes how the reply travelled, not what the tool found, and passing it on
+ * cost us twice in the same run.
+ *
+ * The model reads the payload as a quoted string - a tool that returned
+ * `{ "branch": "fix/x" }` is shown `{"content":[{"type":"text","text":"{\n  \"branch\"..."}]}`
+ * - which spends tokens on escaping and invites it to guess at the structure.
+ *
+ * And the caller, looking for a field it knows the tool returns, finds nothing:
+ * reading the pushed branch name produced the literal string "branch", so the
+ * pull request was opened against a branch that does not exist.
+ *
+ * Anything that is not the envelope is returned untouched, so this cannot
+ * corrupt a result it does not recognise.
+ */
+export function unwrapMcpResult(result: unknown): unknown {
+  const envelope =
+    typeof result === "string" && result.startsWith("{")
+      ? (() => {
+          try {
+            return JSON.parse(result) as unknown;
+          } catch {
+            return result;
+          }
+        })()
+      : result;
+
+  if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) return envelope;
+
+  const parts = (envelope as { content?: unknown }).content;
+  if (!Array.isArray(parts) || parts.length === 0) return envelope;
+
+  const texts: string[] = [];
+  for (const part of parts) {
+    const { type, text } = (part ?? {}) as { type?: string; text?: string };
+    // A part we do not understand means this is not the envelope we know.
+    if (type !== "text" || typeof text !== "string") return envelope;
+    texts.push(text);
+  }
+
+  const joined = texts.join("\n");
+
+  // A failed tool is reported as text, and stays text: the caller has to be able
+  // to tell a result from a failure.
+  if ((envelope as { isError?: unknown }).isError === true) return joined;
+
+  try {
+    return JSON.parse(joined);
+  } catch {
+    return joined;
+  }
+}
+
 export type Verdict =
   | { outcome: "allowed"; action: string; data: unknown; status: string; ms: number }
   | { outcome: "blocked"; action: string; reason: string; code: string }
@@ -247,7 +304,7 @@ export class GovernedAgent {
       return {
         outcome: "allowed",
         action,
-        data: result.result,
+        data: unwrapMcpResult(result.result),
         status: result.status,
         ms: Date.now() - started,
       };
