@@ -133,6 +133,8 @@ interface SlackPayload {
   type?: string;
   user?: { id?: string; name?: string; username?: string };
   actions?: Array<{ action_id?: string; value?: string }>;
+  /** Present on a `url_verification` post, which Slack uses to test the URL. */
+  challenge?: string;
 }
 
 export function slackInteractionsRouter(deps: {
@@ -166,6 +168,16 @@ export function slackInteractionsRouter(deps: {
       payload = JSON.parse(new URLSearchParams(body).get("payload") ?? "{}") as SlackPayload;
     } catch {
       res.status(400).json({ ok: false, error: "payload was not valid JSON" });
+      return;
+    }
+
+    // Slack tests a newly saved Request URL by posting a challenge, and refuses
+    // to save the URL unless the challenge comes back. It arrives signed like
+    // everything else, so it has already been verified above - which is the
+    // point: the URL cannot be registered unless this deployment can prove it is
+    // the one that holds the signing secret.
+    if (payload.type === "url_verification") {
+      res.status(200).json({ challenge: payload.challenge });
       return;
     }
 
