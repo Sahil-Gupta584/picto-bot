@@ -104,6 +104,7 @@ export function slackEventsRouter(deps: SlackRunDeps): Router {
     // the URL unless the same challenge comes back - signed like everything
     // else, so it has already been verified above.
     if (payload.type === "url_verification") {
+      console.log("[slack] events URL verified by Slack");
       res.status(200).json({ challenge: payload.challenge });
       return;
     }
@@ -137,6 +138,10 @@ async function handle(deps: SlackRunDeps, payload: SlackEventPayload): Promise<v
       if (oldest !== undefined) seen.delete(oldest);
     }
   }
+
+  console.log(
+    `[slack] mention from ${user} in ${channel}: ${message.replace(/\s+/g, " ").slice(0, 120)}`,
+  );
 
   const thread = event.thread_ts ?? ts;
   const sessionKey = slackSession(channel, thread).key;
