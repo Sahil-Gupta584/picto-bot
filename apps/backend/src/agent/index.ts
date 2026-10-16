@@ -196,6 +196,8 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
    * branch invents work nobody asked for.
    */
   let changed = false;
+  /** Guest refusals, in order - the closing answer is composed from these. */
+  const guestRefusals: string[] = [];
 
   try {
     const agentsFile = readAgentsFile(deps.workspaces.resolve(workspaceId));
@@ -330,6 +332,7 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
           // A guest's refusal is final. There is no button here, because the
           // approved route up is a maintainer making the request themselves.
           if (readOnly) {
+            guestRefusals.push(name);
             remember(
               toolResult(
                 call.id,
@@ -461,6 +464,15 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
       }
     }
 
+    // A guest's refusal is a governance outcome with exactly one correct
+    // reading, so the closing sentence is composed here - not left to the
+    // model, which phrased the same refusal four ways in four runs, once as a
+    // vague "platform security policy" with an offer to do work the read-only
+    // plan could not run.
+    if (readOnly && guestRefusals.length > 0) {
+      summary = guestRefusalAnswer(guestRefusals);
+    }
+
     if (!summary) {
       summary = pushed
         ? `Pushed ${pushed}.`
@@ -491,6 +503,15 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
 
 function toolResult(id: string, content: string): ChatMessage {
   return { role: "tool", tool_call_id: id, content };
+}
+
+/** The answer a guest gets when the plan refuses an action. */
+function guestRefusalAnswer(names: string[]): string {
+  const list = names.map((name) => `\`${name}\``).join(" and ");
+  return (
+    `${list} can only run on a maintainer's request — guests get read-only answers. ` +
+    `Ask a workspace maintainer (an admin or owner) to send the same request and it will go through.`
+  );
 }
 
 /**
