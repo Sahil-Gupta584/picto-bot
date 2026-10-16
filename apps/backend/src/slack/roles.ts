@@ -77,15 +77,25 @@ export class SlackRoles {
     return this.resolvedIds?.has(userId) ?? false;
   }
 
-  /** Turn the configured handles (or IDs) into member IDs, once. */
+  /**
+   * Turn the configured handles (or IDs) into member IDs, once.
+   *
+   * `name` is the unique handle Slack shows as @someone, and it is the only
+   * field worth trusting: a display name is free text that two members can
+   * share, so a display name that fits more than one member resolves to nobody
+   * rather than to whoever came last in the member list - and a handle match is
+   * never displaced by one.
+   */
   private async resolve(): Promise<void> {
     const members = await this.client.usersList();
+
     const byHandle = new Map<string, string>();
+    const byDisplay = new Map<string, string | null>(); // null = more than one member
     for (const member of members) {
       if (!member.id || member.deleted) continue;
       if (member.name) byHandle.set(member.name.toLowerCase(), member.id);
       const display = member.profile?.display_name?.trim().toLowerCase();
-      if (display) byHandle.set(display, member.id);
+      if (display) byDisplay.set(display, byDisplay.has(display) ? null : member.id);
     }
 
     const ids = new Set<string>();
@@ -95,14 +105,17 @@ export class SlackRoles {
         ids.add(entry.toUpperCase());
         continue;
       }
-      const id = byHandle.get(entry.toLowerCase());
+      const wanted = entry.toLowerCase();
+      const id = byHandle.get(wanted) ?? byDisplay.get(wanted) ?? undefined;
       if (id) ids.add(id);
       else unmatched.push(entry);
     }
 
     this.resolvedIds = ids;
     if (unmatched.length > 0) {
-      console.warn(`[slack] PICTO_MAINTAINERS entries matching no member: ${unmatched.join(", ")}`);
+      console.warn(
+        `[slack] PICTO_MAINTAINERS entries matching no member (or more than one display name): ${unmatched.join(", ")}`,
+      );
     }
     console.log(
       `[slack] PICTO_MAINTAINERS: ${ids.size} of ${this.configured.length} resolved to member ids`,
