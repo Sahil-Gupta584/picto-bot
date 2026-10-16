@@ -426,24 +426,29 @@ function toolResult(id: string, content: string): ChatMessage {
 /**
  * Make a transcript slice that a provider will actually accept.
  *
- * A conversation is a sequence of turns, and a slice of one can cut into the
- * middle. Both ends have to be repaired, and both failures are fatal to the whole
- * request rather than to the one message:
+ * A conversation is a sequence of turns, and a window into a long one can cut into
+ * the middle of a turn. Both ends have to be repaired, and either failure is fatal
+ * to the whole request rather than to the one message:
+ *
+ *   - A leading fragment. Everything before the first user turn belongs to a turn
+ *     whose beginning fell outside the window: a result with no function name to
+ *     report, or a function call with nothing before it. Providers reject the
+ *     request over it, in a message that names the symptom rather than the cause -
+ *     "function call turn comes immediately after a user turn or after a function
+ *     response turn" - which reads as a broken session rather than a short window,
+ *     and it stays broken for every comment that follows.
  *
  *   - A trailing assistant turn that promised tool calls whose results never
  *     arrived. A run killed between asking and running leaves this behind, and
  *     every provider rejects a promise that was never answered.
  *
- *   - A leading result message whose assistant call fell outside the window. That
- *     message has no function name to report, and the provider rejects the
- *     request over the empty name - which reads as "this session is broken"
- *     rather than "this session is long", and it stays broken for every comment
- *     that follows.
+ * A window with no user turn in it has no usable beginning, so it yields nothing:
+ * the run continues from its current instruction, which is a better request than a
+ * fragment of a turn nobody can read.
  */
 export function completeSequences(messages: ChatMessage[]): ChatMessage[] {
-  let start = 0;
-  while (start < messages.length && messages[start]?.role === "tool") start += 1;
-  const out = messages.slice(start);
+  const start = messages.findIndex((message) => message.role === "user");
+  const out = start === -1 ? [] : messages.slice(start);
 
   let index = out.length - 1;
   while (index >= 0 && out[index]?.role === "tool") index -= 1;
