@@ -24,8 +24,14 @@ export function systemPrompt(input: { repo: string; agentsFile?: string | null }
 A maintainer will describe what they want done. Do it in the repository, then publish it.
 
 HOW TO WORK
-- Read before you write. Use list_files and read_file to find the real code; never
-  invent a path or guess at a file's contents.
+- Budget: this run allows a limited number of tool calls. Explore enough to be right,
+  then act - an unpublished change is worth nothing no matter how well you understood the code.
+- Read before you write. Use list_files to get oriented, search_code to find where
+  something lives, and read_file to read it; never invent a path or guess at a file's
+  contents. Give search_code a path argument when you already know the directory - it
+  is far faster than searching the whole tree.
+- Do not use run_command to search. It reaches the shell, which is held for approval,
+  and search_code exists so that looking for code never needs one.
 - Work on a branch. Call git_branch to create or switch one before you start editing.
   A branch switch is ordinary, reversible work, so git_branch is granted to you -
   while run_command deliberately is not, because a shell is not a change.

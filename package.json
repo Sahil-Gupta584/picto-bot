@@ -28,6 +28,7 @@
     "probe:webhook": "node --env-file=.env scripts/probe-webhook.mjs",
     "probe:slack": "node scripts/probe-slack.mjs",
     "slack:check": "node --env-file=.env scripts/check-slack-endpoint.mjs",
+    "slack:sim": "node --env-file=.env scripts/slack-sim.mjs",
     "probe:invoke": "node --env-file=.env scripts/probe-invoke.mjs",
     "probe:models": "node --env-file=.env scripts/probe-models.mjs",
     "mcp:check": "node --env-file=.env scripts/mcp-check.mjs",

@@ -5,8 +5,9 @@
  *
  *   POST /hooks/github  the trigger - a maintainer mentions the bot on an issue
  *   POST /slack/interactions  the Approve button on a blocked action
- *   POST /mcp/fs        picto-fs    - read_file, write_file, list_files
- *   POST /mcp/repo      picto-repo  - run_command, git_branch, git_commit, push_branch, push_main
+ *   POST /slack/events  a mention in Slack, answered in its own thread
+ *   POST /mcp/fs        Filesystem  - read_file, write_file, list_files, search_code
+ *   POST /mcp/repo      Github      - run_command, git_branch, git_commit, push_branch, push_main
  *   GET  /health        liveness, plus what is currently running
  *
  * The MCP endpoints are what ArmorIQ's proxy calls. They are separate MCP
@@ -20,15 +21,23 @@
  */
 import { PictoApp } from "@picto/agent-core";
 import express from "express";
-import { DB_PATH, GITHUB, PORT, SLACK, WORKSPACES_ROOT } from "./config.js";
+import { DB_PATH, GITHUB, MCP, PORT, SLACK, WORKSPACES_ROOT } from "./config.js";
 import { githubWebhookRouter } from "./github/webhook.js";
 import { createFsServer } from "./mcps/fs/index.js";
 import { createRepoServer } from "./mcps/repo/index.js";
 import { mountMcp } from "./mcps/mount.js";
 import { ApprovalBroker } from "./sessions/broker.js";
+import { quietSdkChatter } from "./log.js";
 import { SessionStore } from "./sessions/store.js";
+import { slackEventsRouter } from "./slack/events.js";
 import { SlackApprover, SlackClient, describeApproval, slackInteractionsRouter } from "./slack/index.js";
+import { SlackRoles } from "./slack/roles.js";
 import { Workspaces } from "./workspace/index.js";
+
+// Before anything that can speak: the SDK narrates every MCP invocation, and a
+// single run of a dozen tools fills the terminal with lines that say nothing the
+// verdict line does not already say.
+quietSdkChatter();
 
 const workspaces = new Workspaces(WORKSPACES_ROOT);
 const store = new SessionStore(DB_PATH);
@@ -107,23 +116,33 @@ if (github) {
       workspaces,
       // A blocked action is offered to a human in Slack, and the run waits.
       requestApproval: approver?.request,
-      onEvent: (event, sessionKey) => {
-        if (event.type === "blocked" || event.type === "held") {
-          console.log(
-            `[picto] ${sessionKey} ${event.type.toUpperCase()} ${event.name} (${event.code}): ${event.reason}`,
-          );
-        }
-      },
     }),
   );
 }
 
 // 2. Slack, also raw. Signed by Slack over the exact bytes.
 if (slackClient) {
+  const roles = new SlackRoles(slackClient, SLACK.maintainers);
   app.use(
     "/slack",
     express.raw({ type: "*/*", limit: "1mb" }),
-    slackInteractionsRouter({ store, broker, client: slackClient }),
+    // A button click. Approve is honoured only from a maintainer; anyone may deny.
+    slackInteractionsRouter({
+      store,
+      broker,
+      client: slackClient,
+      authorityFor: (userId) => roles.authorityFor(userId),
+    }),
+    // A mention. Who asked decides which plan gets signed.
+    slackEventsRouter({
+      app: github,
+      store,
+      workspaces,
+      client: slackClient,
+      roles,
+      requestApproval: approver?.request,
+      repo: SLACK.repo,
+    }),
   );
 }
 
@@ -178,10 +197,17 @@ for (const approval of stale) {
 
 app.listen(PORT, () => {
   console.log(`[picto] listening on http://127.0.0.1:${PORT}`);
-  console.log(`[picto]   hook /hooks/github  ${github ? GITHUB.mention : "(GitHub App not configured)"}`);
-  console.log(`[picto]   slack /slack/interactions  ${slackClient ? SLACK.channel : "(not configured - a block is final)"}`);
-  console.log(`[picto]   MCP  /mcp/fs    picto-fs`);
-  console.log(`[picto]   MCP  /mcp/repo  picto-repo`);
+  console.log(`[picto]   hook        /hooks/github  ${github ? GITHUB.mention : "(GitHub App not configured)"}`);
+  console.log(`[picto]   slack        /slack/interactions  ${slackClient ? SLACK.channel : "(not configured - a block is final)"}`);
+  if (slackClient) {
+    console.log(
+      `[picto]   slack events /slack/events        ${
+        SLACK.repo ? `mentions work on ${SLACK.repo}` : "(set PICTO_SLACK_REPO to answer mentions)"
+      }`,
+    );
+  }
+  console.log(`[picto]   MCP         /mcp/fs    ${MCP.fs}  (registered in ArmorIQ)`);
+  console.log(`[picto]   MCP         /mcp/repo  ${MCP.repo}  (registered in ArmorIQ)`);
   console.log(`[picto]   db:         ${DB_PATH}`);
   console.log(`[picto]   workspaces: ${WORKSPACES_ROOT}`);
 });

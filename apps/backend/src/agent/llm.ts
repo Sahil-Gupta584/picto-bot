@@ -190,40 +190,71 @@ export async function chat(input: {
 
   const models = [LLM.model, ...LLM.fallbacks.filter((name) => name !== LLM.model)];
   const maxAttempts = Math.max(1, Number(process.env.LLM_MAX_ATTEMPTS ?? 3));
+  /**
+   * When the whole chain answers "not right now", wait and try it again.
+   *
+   * Waiting inside a model - attempt after attempt against the same name - is
+   * wrong when a sibling might have capacity, because failover answers sooner
+   * than patience does. But that reasoning assumes the failures are independent.
+   * When they are not - one demand spike hits every model in the chain at once,
+   * as free-tier Google regularly does - the chain is exhausted in ten seconds
+   * and a spike that lasts a minute gets reported as a dead run.
+   *
+   * One full sweep of the chain after a cool-down is patience where it belongs:
+   * between runs, not between attempts. Three sweeps were chosen after a real
+   * spike outlasted two: free-tier Google demand comes in waves that run longer
+   * than a minute, and a recording session cannot re-take a failed run. The
+   * worst case is still about two minutes per stuck call.
+   */
+  const COOLDOWN_MS = 30_000;
+  const COOLDOWN_SWEEPS = 3;
+  const jitterMs = (): number => Math.floor(Math.random() * 2_500);
 
   let lastError: LlmError | undefined;
 
-  for (const [index, model] of models.entries()) {
-    const isLastModel = index === models.length - 1;
+  for (let sweep = 0; sweep < COOLDOWN_SWEEPS; sweep += 1) {
+    for (const [index, model] of models.entries()) {
+      const isLastModel = index === models.length - 1;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        return await once(input, model);
-      } catch (err) {
-        const error = err instanceof LlmError ? err : new LlmError(String(err));
-        lastError = error;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          return await once(input, model);
+        } catch (err) {
+          const error = err instanceof LlmError ? err : new LlmError(String(err));
+          lastError = error;
 
-        if (!isTransient(error) && !isModelUnavailable(error)) throw error;
+          if (!isTransient(error) && !isModelUnavailable(error)) throw error;
 
-        if (shouldSkipModel(error, !isLastModel)) {
-          if (isLastModel) break;
+          if (shouldSkipModel(error, !isLastModel)) {
+            if (isLastModel) break;
+            console.warn(
+              `[llm] ${model} ${error.status ?? "connection error"} - ` +
+                `trying ${models[index + 1]}`,
+            );
+            break;
+          }
+
+          // Out of attempts. Nothing left to wait for, so stop and report.
+          if (attempt === maxAttempts) break;
+
+          const wait = error.retryAfterMs ?? backoffMs(attempt);
           console.warn(
-            `[llm] ${model} ${error.status ?? "connection error"} - ` +
-              `trying ${models[index + 1]}`,
+            `[llm] ${model} ${error.status ?? "connection error"} - attempt ` +
+              `${attempt}/${maxAttempts}, retrying in ${(wait / 1000).toFixed(1)}s`,
           );
-          break;
+          await sleep(wait);
         }
-
-        // Out of attempts. Nothing left to wait for, so stop and report.
-        if (attempt === maxAttempts) break;
-
-        const wait = error.retryAfterMs ?? backoffMs(attempt);
-        console.warn(
-          `[llm] ${model} ${error.status ?? "connection error"} - attempt ` +
-            `${attempt}/${maxAttempts}, retrying in ${(wait / 1000).toFixed(1)}s`,
-        );
-        await sleep(wait);
       }
+    }
+
+    const moreSweeps = sweep < COOLDOWN_SWEEPS - 1;
+    if (moreSweeps && lastError && isTransient(lastError)) {
+      console.warn(
+        `[llm] every model is unavailable (${lastError.status ?? "connection error"}) - ` +
+          `cooling down 45s before the next sweep`,
+      );
+      await sleep(COOLDOWN_MS + jitterMs());
+      continue;
     }
   }
 
@@ -235,6 +266,9 @@ export async function chat(input: {
       lastError.status,
     );
   }
+  console.error(
+    `[llm] giving up: no model answered (${models.join(", ")}) - the run reports this honestly and stops`,
+  );
   throw lastError ?? new LlmError("No model configured. Set LLM_MODEL in .env.");
 }
 

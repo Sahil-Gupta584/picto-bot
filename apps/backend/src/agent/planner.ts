@@ -35,6 +35,7 @@ const BASELINE = [
   "list_files",
   "read_file",
   "write_file",
+  "search_code",
   "git_branch",
   "git_commit",
   "push_branch",
@@ -59,6 +60,17 @@ const BASELINE = [
  * forward is a fresh plan that a human approved.
  */
 const NEVER_AUTO_DECLARED = new Set(["push_main", "run_command"]);
+
+/**
+ * The charter of a request from someone who does not maintain the repository.
+ *
+ * A guest's request is answered, not acted on: the plan ArmorIQ signs contains
+ * only tools that cannot change the working copy or publish anything. The agent
+ * itself is not told - it proposes what the request needs, the call the plan
+ * does not cover is refused by ArmorIQ, and the refusal is what the reply
+ * reports.
+ */
+const READ_ONLY = ["list_files", "read_file", "search_code"];
 
 export interface PlannedIntent extends IntentPlan {
   /** Steps the model asked for that we refused to auto-declare. */
@@ -97,6 +109,8 @@ function actionsFromTruncated(text: string): string[] {
 export async function planFromPrompt(input: {
   instruction: string;
   repo: string;
+  /** Sign a read-only plan: nothing that can change or publish anything. */
+  readOnly?: boolean;
 }): Promise<PlannedIntent> {
   const message = await chat({
     messages: [
@@ -146,11 +160,18 @@ export async function planFromPrompt(input: {
       refused.push(name);
       return;
     }
+    if (input.readOnly && !READ_ONLY.includes(name)) {
+      refused.push(name);
+      return;
+    }
     seen.add(name);
     steps.push({ action: name, mcp: def.mcp, params: {}, description: reason ?? def.title });
   };
 
-  for (const name of BASELINE) add(name, "ordinary work for this agent");
+  // A guest's plan is the read-only charter; a maintainer's is the full one.
+  for (const name of input.readOnly ? READ_ONLY : BASELINE) {
+    add(name, input.readOnly ? "read-only request" : "ordinary work for this agent");
+  }
   for (const step of requested) add(step.action, step.reason);
 
   return { goal, steps, refused, unknown };

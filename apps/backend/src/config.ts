@@ -126,6 +126,28 @@ export const SLACK = {
   botToken: process.env.SLACK_BOT_TOKEN ?? "",
   channel: process.env.SLACK_CHANNEL ?? "",
   signingSecret: process.env.SLACK_SIGNING_SECRET ?? "",
+  /**
+   * The repository a conversation on Slack works on, owner/name.
+   *
+   * A mention does not name a repository the way an issue does, so the channel
+   * is bound to one. Falls back to GITHUB_REPO, which is already the repository
+   * the local scripts default to.
+   */
+  repo: process.env.PICTO_SLACK_REPO ?? process.env.GITHUB_REPO ?? "",
+  /**
+   * Who may command the agent, written as @handles or member IDs.
+   *
+   * Handles are how people know each other, but they are only input: the list
+   * is resolved to immutable member IDs the first time it is needed, and every
+   * decision after that compares IDs. A handle can be renamed and a display
+   * name can be imitated; the ID cannot. Workspace admins and owners always
+   * count as maintainers - this list only adds people Slack does not already
+   * trust with the workspace.
+   */
+  maintainers: (process.env.PICTO_MAINTAINERS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean),
 };
 
 /**

@@ -217,8 +217,6 @@ async function work(input: {
           ``,
           `**Declared intent** (signed by ArmorIQ)`,
           ...event.steps.map((step) => `- \`${step}\``),
-          ``,
-          `**Excluded from the plan** — ${refused}`,
         ].join("\n"),
       );
     }

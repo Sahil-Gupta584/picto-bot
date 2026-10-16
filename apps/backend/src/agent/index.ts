@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { IDENTITY, LLM, armorIqApiKey } from "../config.js";
+import { describeEvent } from "../log.js";
 import { bindRunArgs, chatTools, toolByName } from "../mcps/registry.js";
 import { safeWorkspaceId } from "../sessions/keys.js";
 import type { SessionStore } from "../sessions/store.js";
@@ -29,7 +30,17 @@ import { chat, parseToolArgs, type ChatMessage } from "./llm.js";
 import { planFromPrompt } from "./planner.js";
 import { systemPrompt } from "./prompts.js";
 
-const MAX_TURNS = 24;
+const MAX_TURNS = 32;
+/**
+ * When to tell the model that the budget is finite.
+ *
+ * A run on an unfamiliar repository spends a fifth of its calls just learning
+ * where things are, and a model with no sense of a budget will keep researching
+ * until the cap throws the work away unpublished. This lands late enough that
+ * exploration is still serious, early enough to leave room to write, commit and
+ * push.
+ */
+const BUDGET_WARNING_AT = 21;
 const INTENT_TTL_SECONDS = 1800;
 const MAX_TOOL_RESULT_CHARS = 8_000;
 /** How much of the conversation the model is shown. */
@@ -100,6 +111,15 @@ export interface RunInput {
   requestApproval?: (request: ApprovalRequest) => Promise<boolean>;
   /** Keep the working copy after the run. Defaults to true for a real session. */
   keepWorkspace?: boolean;
+  /**
+   * Who is asking.
+   *
+   * A guest's run is planned read-only and has no approval path: the plan
+   * ArmorIQ signs cannot change or publish anything, and a refusal is a final
+   * answer rather than a question for a human. Defaults to a maintainer, which
+   * is what every GitHub-issue run is.
+   */
+  authority?: "maintainer" | "guest";
 }
 
 export interface RunResult {
@@ -118,11 +138,15 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
   const emit = (event: RunEvent): void => {
     events.push(event);
     input.onEvent?.(event);
-    if (event.type !== "reply") console.log(`[picto] ${JSON.stringify(event)}`);
+    const line = describeEvent(event, input.sessionKey);
+    if (line) console.log(line);
   };
 
   const workspaceId = safeWorkspaceId(input.sessionKey);
   const store = input.store;
+  // A guest's request is answered, not acted on, so its plan is signed
+  // read-only and the refusals below are final.
+  const readOnly = input.authority === "guest";
   const session = store.ensureSession({
     key: input.sessionKey,
     source: input.sessionKey.startsWith("gh:")
@@ -163,6 +187,15 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
   let summary = "";
   let planHash = "";
   let nudged = false;
+  /**
+   * Whether this run wrote anything to the working copy.
+   *
+   * The "you did not publish" nudge is for a run that left work on disk - not
+   * for every run that ends without a push. An issue opened, a question
+   * answered, a command run: those are finished work, and asking them to push a
+   * branch invents work nobody asked for.
+   */
+  let changed = false;
 
   try {
     const agentsFile = readAgentsFile(deps.workspaces.resolve(workspaceId));
@@ -188,6 +221,7 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
     const planned = await planFromPrompt({
       instruction: input.instruction,
       repo: `${input.owner}/${input.repo}`,
+      readOnly,
     });
 
     let intent = await agent.declareIntent({
@@ -209,7 +243,20 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
     });
 
     // 2. Work.
+    let warned = false;
     for (let turn = 0; turn < MAX_TURNS; turn += 1) {
+      if (turn === BUDGET_WARNING_AT && !warned && !readOnly) {
+        warned = true;
+        remember({
+          role: "user",
+          content:
+            `You have made ${turn} tool calls, and this run allows ${MAX_TURNS} in total. ` +
+            "Stop exploring. Decide the smallest change that does the job, make it with write_file, " +
+            "then git_commit and push_branch. Running out of turns here leaves the maintainer " +
+            "with research and nothing to review.",
+        });
+      }
+
       const assistant = await chat({ messages, tools: chatTools(), temperature: 0 });
 
       // The transcript is stored and replayed, so even a turn the model ended
@@ -233,7 +280,7 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
         // one reminder that it was not followed. Once is the right number: a
         // model that declines a second time will not be argued into it, and a
         // loop that keeps asking is worse than one that stops and says so.
-        if (!pushed && !nudged) {
+        if (!pushed && !nudged && !readOnly && changed) {
           nudged = true;
           emit({ type: "nudge", text: said || "ended its turn before publishing" });
           remember({
@@ -279,6 +326,21 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
               ? { type: "held", name, mcp: def.mcp, code: verdict.code, reason: verdict.reason }
               : { type: "blocked", name, mcp: def.mcp, code: verdict.code, reason: verdict.reason },
           );
+
+          // A guest's refusal is final. There is no button here, because the
+          // approved route up is a maintainer making the request themselves.
+          if (readOnly) {
+            remember(
+              toolResult(
+                call.id,
+                `REFUSED by ArmorIQ: "${name}" is not part of the plan signed for this request ` +
+                  `(${verdict.code}), so it cannot be called. Do not retry it. Answer the ` +
+                  `requester in one or two sentences: an action like this needs a maintainer to ` +
+                  `ask for it.`,
+              ),
+            );
+            continue;
+          }
 
           if (APPROVABLE.has(verdict.code)) {
             const approvalId = randomUUID();
@@ -372,6 +434,8 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
             emit({ type: "pushed", target: pushed, url: data?.url });
           }
 
+          if (name === "write_file" || name === "git_commit") changed = true;
+
           remember(toolResult(call.id, JSON.stringify(verdict.data ?? {}).slice(0, MAX_TOOL_RESULT_CHARS)));
         } else if (verdict.outcome === "error") {
           // Not a governance decision: the call never reached the tool, for an
@@ -397,7 +461,13 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
       }
     }
 
-    if (!summary) summary = pushed ? `Pushed ${pushed}.` : "Stopped without publishing.";
+    if (!summary) {
+      summary = pushed
+        ? `Pushed ${pushed}.`
+        : `I spent this run's ${MAX_TURNS} tool-call budget without publishing, so there is nothing to review. ` +
+          "A follow-up comment resumes this conversation with everything I have already learned — " +
+          "the transcript and the clone are kept.";
+    }
     store.updateSession(input.sessionKey, { status: pushed ? "published" : "idle" });
 
     return {

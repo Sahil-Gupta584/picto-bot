@@ -1,8 +1,9 @@
 /**
  * picto-repo - run commands and move work to GitHub, inside one workspace.
  *
- * Why these five live together: they all operate on the working copy rather than
- * on its contents.
+ * Why these live together: they all do something to the repository itself - five
+ * of them through its working copy, create_issue through its issue tracker.
+ * Reading the contents back is picto-fs's half of the surface.
  *
  * `push_branch` and `push_main` are separate tools on purpose. ArmorIQ matches
  * tool NAMES, not arguments - a single `git_push` tool would make "publish a
@@ -272,6 +273,54 @@ export const repoTools: ToolDefinition[] = [
       } catch (error) {
         throw new Error(sanitize((error as Error).message, record.token));
       }
+    },
+  },
+
+  {
+    mcp: REPO_MCP_NAME,
+    name: "create_issue",
+    title: "Open a GitHub issue",
+    description:
+      "Open a new issue on this repository through the GitHub API, for recording a bug " +
+      "someone reported or a request to track. This does not touch the working copy; it " +
+      "publishes a new issue people will see.",
+    shape: {
+      workspace: WORKSPACE_ARG,
+      title: z.string().describe("Issue title - short and specific"),
+      body: z
+        .string()
+        .optional()
+        .describe("Issue body in Markdown. Include what the reporter said and any detail found."),
+    },
+    handler: async (args, ctx) => {
+      const record = ctx.workspaces.get(String(args.workspace));
+      const response = await fetch(
+        `https://api.github.com/repos/${record.owner}/${record.repo}/issues`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${record.token}`,
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "picto-agent",
+          },
+          body: JSON.stringify({
+            title: String(args.title),
+            ...(args.body ? { body: String(args.body) } : {}),
+          }),
+        },
+      );
+      if (!response.ok) {
+        const detail = sanitize((await response.text()).slice(0, 500), record.token);
+        throw new Error(`GitHub refused the issue (${response.status}): ${detail}`);
+      }
+      const issue = (await response.json()) as { number: number; html_url: string; title?: string };
+      return {
+        number: issue.number,
+        url: issue.html_url,
+        title: issue.title ?? String(args.title),
+      };
     },
   },
 ];

@@ -41,7 +41,27 @@ export { verifySlackRequest, signSlackRequest } from "./verify.js";
 /** How long a blocked run will wait for a human before giving up. */
 export const APPROVAL_TIMEOUT_MS = Number(process.env.SLACK_APPROVAL_TIMEOUT_MS ?? 30 * 60 * 1000);
 
+/**
+ * Who is asking, decided from their Slack identity - never from the text.
+ *
+ * `guest` is also the answer for "unknown", because guessing in that direction
+ * is the only kind of wrong that matters here.
+ */
+export type Authority = "maintainer" | "guest";
+
 // ── the Slack Web API, as much of it as we need ─────────────────────────────
+
+/** The fields of a Slack member this server reads. Named as Slack names them. */
+export interface SlackUserInfo {
+  id?: string;
+  name?: string;
+  deleted?: boolean;
+  is_bot?: boolean;
+  is_admin?: boolean;
+  is_owner?: boolean;
+  is_primary_owner?: boolean;
+  profile?: { display_name?: string; real_name?: string };
+}
 
 export class SlackClient {
   constructor(
@@ -70,13 +90,17 @@ export class SlackClient {
 
   postMessage(input: {
     text: string;
-    blocks: unknown[];
+    /** Rich rendering. Optional: a plain text reply is often enough. */
+    blocks?: unknown[];
     channel?: string;
+    /** Reply inside a thread. */
+    threadTs?: string;
   }): Promise<{ channel: string; ts: string }> {
     return this.call<{ channel: string; ts: string }>("chat.postMessage", {
       channel: input.channel ?? this.defaultChannel,
       text: input.text,
-      blocks: input.blocks,
+      ...(input.blocks ? { blocks: input.blocks } : {}),
+      ...(input.threadTs ? { thread_ts: input.threadTs } : {}),
       unfurl_links: false,
     });
   }
@@ -88,6 +112,53 @@ export class SlackClient {
       text: input.text,
       blocks: input.blocks,
     });
+  }
+
+  /**
+   * GET a Web API method with query parameters.
+   *
+   * users.info and users.list are lookups, and the GET form is the one Slack
+   * has always accepted query strings on.
+   */
+  private async get<T>(method: string, params: Record<string, string>): Promise<T> {
+    const url = new URL(`https://slack.com/api/${method}`);
+    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${this.token}` } });
+    const json = (await response.json()) as { ok?: boolean; error?: string };
+    if (!json.ok) {
+      throw new Error(`slack ${method} failed: ${json.error ?? `HTTP ${response.status}`}`);
+    }
+    return json as T;
+  }
+
+  /**
+   * One member's workspace profile, including whether Slack itself considers
+   * them an admin or owner. Null means Slack could not or would not answer,
+   * which the caller must read as "unknown", never as "fine".
+   */
+  async usersInfo(userId: string): Promise<SlackUserInfo | null> {
+    try {
+      const json = await this.get<{ user?: SlackUserInfo }>("users.info", { user: userId });
+      return json.user ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Every member of the workspace, paged. Turns @handles into member IDs once. */
+  async usersList(): Promise<SlackUserInfo[]> {
+    const members: SlackUserInfo[] = [];
+    let cursor = "";
+    do {
+      const json = await this.get<{
+        members?: SlackUserInfo[];
+        response_metadata?: { next_cursor?: string };
+      }>("users.list", cursor ? { limit: "200", cursor } : { limit: "200" });
+      members.push(...(json.members ?? []));
+      cursor = json.response_metadata?.next_cursor ?? "";
+    } while (cursor);
+    return members;
   }
 }
 
@@ -109,7 +180,8 @@ export class SlackApprover {
       const posted = await this.deps.client.postMessage(approvalBlocks(request));
       this.deps.store.markApprovalNotified(request.id, posted.channel, posted.ts);
       console.log(
-        `[slack] asked for approval: ${request.action} (${request.id.slice(0, 8)}) in ${posted.channel}`,
+        `[slack] message sent to ${posted.channel}: approve ${request.action} ` +
+          `(${request.id.slice(0, 8)}) — the run is waiting`,
       );
     } catch (error) {
       // Deliberately not fatal. The run still stops; it just stops without a
@@ -141,6 +213,11 @@ export function slackInteractionsRouter(deps: {
   store: SessionStore;
   broker: ApprovalBroker;
   client: SlackClient;
+  /**
+   * Who counts as a maintainer. Omitted means every click is honoured, which
+   * is only correct when there is no identity to check against.
+   */
+  authorityFor?: (userId: string) => Promise<Authority>;
 }): Router {
   const router = Router();
 
@@ -191,7 +268,12 @@ export function slackInteractionsRouter(deps: {
 }
 
 async function decide(
-  deps: { store: SessionStore; broker: ApprovalBroker; client: SlackClient },
+  deps: {
+    store: SessionStore;
+    broker: ApprovalBroker;
+    client: SlackClient;
+    authorityFor?: (userId: string) => Promise<Authority>;
+  },
   payload: SlackPayload,
 ): Promise<void> {
   const action = payload.actions?.[0];
@@ -203,6 +285,26 @@ async function decide(
   if (!approved && !denied) return;
 
   const by = payload.user?.username ?? payload.user?.name ?? payload.user?.id ?? "someone";
+
+  // Approving is the privileged direction, so it is the one that checks who is
+  // clicking. Denying stays open to everyone: stopping something is never the
+  // dangerous direction, and a bystander should not need permission to pull
+  // the brake.
+  if (approved && deps.authorityFor && payload.user?.id) {
+    const authority = await deps.authorityFor(payload.user.id);
+    if (authority !== "maintainer") {
+      console.warn(
+        `[slack] ignored an approve click from ${by} (${payload.user.id}): not a maintainer`,
+      );
+      await noteOnMessage(
+        deps.client,
+        deps.store,
+        approvalId,
+        `🚫 *${by}* tried to approve, but only maintainers can decide this. Nothing changed; the request is still waiting.`,
+      );
+      return;
+    }
+  }
 
   // Refuses to overwrite an existing decision, so a replayed callback cannot
   // turn a denial into an approval.
@@ -236,17 +338,43 @@ async function decide(
   }
 }
 
+/**
+ * Say something under an approval message when there is one to speak under.
+ *
+ * Used for clicks that were refused: the person needs an answer, and silence
+ * would read as a broken button.
+ */
+async function noteOnMessage(
+  client: SlackClient,
+  store: SessionStore,
+  approvalId: string,
+  markdown: string,
+): Promise<void> {
+  const record = store.getApproval(approvalId);
+  const thread = Boolean(record?.notifiedChannel && record?.notifiedTs);
+  try {
+    await client.postMessage({
+      text: markdown.replace(/[*🚫]/g, "").trim(),
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: markdown } }],
+      channel: thread ? (record?.notifiedChannel ?? undefined) : undefined,
+      threadTs: thread ? (record?.notifiedTs ?? undefined) : undefined,
+    });
+  } catch (error) {
+    console.error(`[slack] could not report a refused click: ${reason(error)}`);
+  }
+}
+
 /** Photo of an approval, for the startup log. */
 export function describeApproval(approval: ApprovalRecord): string {
   return `${approval.action} on ${approval.mcp} for ${approval.sessionKey}`;
 }
 
-function header(req: Request, name: string): string | undefined {
+export function header(req: Request, name: string): string | undefined {
   const value = req.headers[name];
   return Array.isArray(value) ? value[0] : value;
 }
 
-function rawBody(req: Request): string {
+export function rawBody(req: Request): string {
   const body = req.body as unknown;
   if (Buffer.isBuffer(body)) return body.toString("utf8");
   if (typeof body === "string") return body;
