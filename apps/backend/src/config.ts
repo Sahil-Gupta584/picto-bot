@@ -136,7 +136,7 @@ export const SLACK = {
 export const LLM = {
   baseUrl: process.env.LLM_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta/openai",
   apiKey: process.env.LLM_API_KEY ?? process.env.OPENAI_API_KEY ?? "",
-  model: process.env.LLM_MODEL ?? "gemini-3.1-flash-lite",
+  model: process.env.LLM_MODEL ?? "gemini-3.5-flash-lite",
   /**
    * Models to try, in order, if the one above will not answer. Comma-separated.
    *
@@ -148,7 +148,7 @@ export const LLM = {
    * Kept in configuration rather than in code for the same reason the MCP names
    * are: which models exist is a property of the account, not of the agent.
    */
-  fallbacks: (process.env.LLM_FALLBACK_MODELS ?? "gemini-3.5-flash-lite")
+  fallbacks: (process.env.LLM_FALLBACK_MODELS ?? "gemini-3.1-flash-lite")
     .split(",")
     .map((name) => name.trim())
     .filter(Boolean),
