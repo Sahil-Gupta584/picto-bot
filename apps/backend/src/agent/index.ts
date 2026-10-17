@@ -13,14 +13,14 @@
  */
 import {
   GovernedAgent,
-  PICTO_POLICY,
+  policyFor,
   type DeclaredIntent,
   type Verdict,
 } from "@picto/agent-core";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { IDENTITY, LLM, armorIqApiKey } from "../config.js";
+import { identityFor, LLM, armorIqApiKey } from "../config.js";
 import { describeEvent } from "../log.js";
 import { bindRunArgs, chatTools, toolByName } from "../mcps/registry.js";
 import { safeWorkspaceId } from "../sessions/keys.js";
@@ -181,7 +181,11 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
   }
   store.updateSession(input.sessionKey, { workspace: workspaceId, status: "running" });
 
-  const agent = new GovernedAgent(IDENTITY, armorIqApiKey());
+  // Authority reaches ArmorIQ as an identity and as the rules that identity is
+  // held to, so the decision is one ArmorIQ made rather than one we asserted.
+  const authority = input.authority ?? "maintainer";
+  const agent = new GovernedAgent(identityFor(authority), armorIqApiKey());
+  const policy = policyFor(authority);
   const transcript: ChatMessage[] = [];
   let pushed: string | null = null;
   let summary = "";
@@ -230,7 +234,7 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
       llm: LLM.model,
       prompt: input.instruction,
       plan: planned,
-      policy: PICTO_POLICY,
+      policy,
       validitySeconds: INTENT_TTL_SECONDS,
     });
     planHash = intent.planHash;
@@ -401,7 +405,7 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
                   },
                   approvedBy: by,
                   reason: verdict.reason,
-                  policy: PICTO_POLICY,
+                  policy,
                   validitySeconds: INTENT_TTL_SECONDS,
                 });
                 planHash = intent.planHash;

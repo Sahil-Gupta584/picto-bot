@@ -106,6 +106,28 @@ export const IDENTITY = {
   contextId: "default",
 };
 
+/**
+ * The identity ArmorIQ evaluates policy against, per request.
+ *
+ * Authority is a property of who asked, so it has to reach ArmorIQ as an
+ * identity rather than stay in our process: a policy is only able to answer
+ * "may this caller use this tool?" if the caller is who the policy was written
+ * for. The agent id is shared on purpose - it is the agent's authority that is
+ * being varied, not which agent is running.
+ *
+ * Defaults preserve the pre-identity behaviour (one caller) so a deployment
+ * that never sets them keeps behaving exactly as before.
+ */
+export function identityFor(authority: "maintainer" | "guest"): typeof IDENTITY {
+  return {
+    ...IDENTITY,
+    userId:
+      authority === "guest"
+        ? (process.env.ARMORIQ_GUEST_USER_ID ?? IDENTITY.userId)
+        : (process.env.ARMORIQ_MAINTAINER_USER_ID ?? IDENTITY.userId),
+  };
+}
+
 export const GITHUB = {
   appId: process.env.GITHUB_APP_ID ?? "",
   webhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? "",

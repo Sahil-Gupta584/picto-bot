@@ -62,22 +62,37 @@ export interface Policy {
  * should stop and ask a human. `deny` would be wrong here - it is absolute and
  * has no approval path, so it could never be resumed.
  */
-export const PICTO_POLICY: Policy = {
-  rules: [
-    {
-      id: "publishing-a-branch",
-      action: "allow",
-      tool: "push_branch",
-      reason: "Publishing to a branch is reviewable and reversible.",
-    },
-    {
-      id: "default-branch-needs-a-human",
-      action: "require_approval",
-      tool: "push_main",
-      reason: "Writing to the default branch bypasses review and is not reversible by closing a PR.",
-    },
-  ],
-};
+/** The rules a maintainer's request carries. */
+export const PICTO_POLICY: Policy = { rules: [] };
+
+/**
+ * The rules a request carries, chosen by WHO asked.
+ *
+ * Only the guest request is constrained. A maintainer is the repository's own
+ * authority: what they may do is decided by what the planner declares, which is
+ * reviewed work on a branch - there is no standing rule to add for them.
+ *
+ * The guest rule is the interesting one. The plan already withholds create_issue
+ * from a guest, so this rule is not what stops the call - the plan is. It is
+ * what makes the refusal say why, on ArmorIQ's side, in a decision the console
+ * shows: the identical request from a maintainer is evaluated against the same
+ * rule set and passes.
+ */
+export function policyFor(authority: "maintainer" | "guest"): Policy {
+  if (authority !== "guest") return PICTO_POLICY;
+
+  return {
+    rules: [
+      {
+        id: "guests-get-read-only-answers",
+        action: "deny",
+        tool: "create_issue",
+        reason:
+          "Guests get read-only answers. This action runs only when a maintainer asks for it themselves.",
+      },
+    ],
+  };
+}
 
 /**
  * Reduce an MCP result to the value the tool actually returned.
