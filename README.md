@@ -1,7 +1,6 @@
 # Picto
 
-A governed agent that works in a Slack channel. Anyone can ask; only a maintainer
-can change anything. ArmorIQ signs the plan and refuses every call that isn't in it.
+Picto is a generalist agent teams can integrate in in github, slack organisation to get productive. all the agent actions are observed and geted by [Armor](https://armoriq.ai)
 
 ## The idea
 
