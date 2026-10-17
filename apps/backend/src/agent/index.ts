@@ -496,7 +496,7 @@ export async function runTask(input: RunInput, deps: { workspaces: Workspaces })
     store.updateSession(input.sessionKey, { status: "error" });
     throw err;
   } finally {
-    agent.close();
+    await agent.close();
     if (input.keepWorkspace === false) deps.workspaces.destroy(workspaceId);
   }
 }

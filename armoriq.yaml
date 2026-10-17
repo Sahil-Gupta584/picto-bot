@@ -28,13 +28,13 @@ proxy:
 # ARMORIQ_MCP_REPO in .env, and the name registered in the dashboard.
 mcp_servers:
   - id: Filesystem
-    url: https://3fdc-171-48-84-150.ngrok-free.app/mcp/fs
+    url: https://50f9-106-194-232-115.ngrok-free.app/mcp/fs
     description: Workspace filesystem - read_file, write_file, list_files
     auth:
       type: none
 
   - id: Github
-    url: https://3fdc-171-48-84-150.ngrok-free.app/mcp/repo
+    url: https://50f9-106-194-232-115.ngrok-free.app/mcp/repo
     description: Workspace execution and git - run_command, git_commit, push_branch, push_main
     auth:
       type: none

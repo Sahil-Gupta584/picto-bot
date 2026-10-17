@@ -5,8 +5,16 @@ import {
   PolicyHoldException,
   TokenExpiredException,
   InvalidTokenException,
+  endTrace,
+  flushObservability,
+  openSpan,
+  closeSpan,
+  recordPolicyCall,
+  startTrace,
   type IntentToken,
   type MCPInvocationResult,
+  type ObservabilityRecorder,
+  type TraceContext,
 } from "@armoriq/sdk";
 
 /**
@@ -178,6 +186,20 @@ function describeFailure(
 export class GovernedAgent {
   private readonly client: ArmorIQClient;
 
+  /**
+   * Telemetry transport only.
+   *
+   * ArmorIQ's console records a session/trace per signed plan, but ONLY when a
+   * session exists - the SDK ships nothing from a bare client. So the run owns a
+   * session whose recorder collects the spans and whose shipper sends them, while
+   * enforcement keeps using the client exactly as before. Every telemetry call is
+   * best-effort: telemetry is not an enforcement dependency, and a run must never
+   * fail because a trace could not be recorded.
+   */
+  private readonly session: ReturnType<ArmorIQClient["startSession"]> | null;
+  private trace: TraceContext | null = null;
+  private deniedActions = 0;
+
   constructor(
     private readonly identity: { agentId: string; userId: string; contextId?: string },
     apiKey?: string,
@@ -187,6 +209,47 @@ export class GovernedAgent {
       userId: identity.userId,
       agentId: identity.agentId,
       contextId: identity.contextId ?? "default",
+    });
+    try {
+      this.session = this.client.startSession({ mode: "sdk" });
+    } catch {
+      this.session = null;
+    }
+  }
+
+  /** The recorder, when telemetry is available. Null means "ship nothing". */
+  private get recorder(): ObservabilityRecorder | null {
+    return this.session?.observabilityRecorder ?? null;
+  }
+
+  /** Run `fn`, discarding any telemetry failure. */
+  private static obs(fn: () => void): void {
+    try {
+      fn();
+    } catch {
+      /* telemetry is best-effort and never an enforcement dependency */
+    }
+  }
+
+  /**
+   * Open the console trace for one signed plan.
+   *
+   * ArmorIQ's trace lifecycle is one plan per trace, so a re-declared plan (the
+   * only way an approved action can run) closes the previous trace and opens its
+   * own - which is exactly what the console shows as two runs.
+   */
+  private openTrace(plan: IntentPlan, planHash: string, llm: string): void {
+    const rec = this.recorder;
+    if (!rec) return;
+    GovernedAgent.obs(() => {
+      if (this.trace) endTrace(rec, this.trace!, { status: "ok" });
+      this.deniedActions = 0;
+      this.trace = startTrace(rec, "iap.plan", {
+        goal: plan.goal,
+        planHash,
+        llm,
+        steps: plan.steps.map((s) => s.action),
+      });
     });
   }
 
@@ -217,6 +280,8 @@ export class GovernedAgent {
       input.policy ? { rules: input.policy.rules } : undefined,
       input.validitySeconds ?? 300,
     );
+
+    this.openTrace(input.plan, token.planHash, input.llm);
 
     return {
       token,
@@ -292,6 +357,50 @@ export class GovernedAgent {
     userEmail?: string,
   ): Promise<Verdict> {
     const started = Date.now();
+    const rec = this.recorder;
+    const ctx = this.trace;
+
+    // The span opens before the call and closes with its outcome, so the console
+    // shows how long the governed call took and how it ended.
+    let spanId: string | null = null;
+    if (rec && ctx) {
+      GovernedAgent.obs(() => {
+        spanId = openSpan(rec, ctx, {
+          name: `${mcp}.${action}`,
+          attributes: { toolName: action, mcp, input: params },
+        });
+      });
+    }
+
+    const record = (
+      decision: "allow" | "deny" | "hold",
+      output: unknown,
+      reason: string | null,
+    ): void => {
+      if (!rec || !ctx) return;
+      GovernedAgent.obs(() => {
+        recordPolicyCall(rec, ctx, {
+          policyId: `signed-plan:${intent.planHash.slice(0, 12)}`,
+          policyName: intent.plan.goal,
+          decision,
+          reason,
+          source: "proxy",
+          input: { mcp, action, params },
+          output,
+          matchedRuleId: action,
+          enforcementAction: decision === "allow" ? "allow" : decision === "hold" ? "hold" : "block",
+          dataClasses: [],
+        });
+      });
+    };
+
+    const finishSpan = (status: "ok" | "error" | "denied"): void => {
+      if (!rec || !ctx || !spanId) return;
+      GovernedAgent.obs(() => {
+        closeSpan(rec, ctx, spanId!, { status, durationMs: Date.now() - started });
+      });
+    };
+
     try {
       const result: MCPInvocationResult = await this.client.invoke(
         mcp,
@@ -301,10 +410,13 @@ export class GovernedAgent {
         undefined,
         userEmail,
       );
+      const data = unwrapMcpResult(result.result);
+      record("allow", data, null);
+      finishSpan("ok");
       return {
         outcome: "allowed",
         action,
-        data: unwrapMcpResult(result.result),
+        data,
         status: result.status,
         ms: Date.now() - started,
       };
@@ -319,16 +431,48 @@ export class GovernedAgent {
       const reason = describeFailure(e?.message, e?.statusCode, mcp, action);
 
       if (code === PolicyHoldException.name) {
+        record("hold", null, reason);
+        this.deniedActions += 1;
+        finishSpan("denied");
         return { outcome: "held", action, reason, code, delegationId: e.delegationId };
       }
       if (BLOCK_CODES.has(code)) {
+        record("deny", null, `${code}: ${reason}`);
+        this.deniedActions += 1;
+        finishSpan("denied");
         return { outcome: "blocked", action, reason, code };
       }
+      record("deny", null, `${code}: ${reason}`);
+      finishSpan("error");
       return { outcome: "error", action, reason, code };
     }
   }
 
-  close(): void {
+  /**
+   * Close the run: end the plan trace, flush the spans, then shut the client.
+   *
+   * Flush before teardown, because the shipper is in-memory and fire-and-forget
+   * - a trace that was never POSTed is a trace the console cannot show.
+   */
+  async close(): Promise<void> {
+    const rec = this.recorder;
+    if (rec && this.trace) {
+      const ctx = this.trace;
+      // A plan that had at least one refused action ends as `denied`, which is
+      // what the console's Denied filter looks for.
+      const status = this.deniedActions > 0 ? "denied" : "ok";
+      GovernedAgent.obs(() => endTrace(rec, ctx, { status }));
+      try {
+        await flushObservability(rec);
+      } catch {
+        /* best-effort: shipping errors must not surface to the caller */
+      }
+    }
+    try {
+      await this.session?.close();
+    } catch {
+      /* ignore */
+    }
     this.client.close();
   }
 }
